@@ -1,10 +1,11 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from matplotlib.pyplot import table
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 import numpy as np
-from scipy.stats import ttest_rel
+from scipy.stats import shapiro, wilcoxon, false_discovery_control
 
 
 def load_data():
@@ -56,6 +57,9 @@ def emotion_shifts():
     for emotion in emotion_labels:
         emotion_diffs[f'diff_{emotion}'] = data[f'it_{emotion}'] - data[f'eng_{emotion}']
 
+    print(emotion_diffs)
+
+    # emotion dif boxplots
     diff_cols = [col for col in emotion_diffs.columns if col.startswith('diff_')]
     emotion_diffs[diff_cols].plot(kind='box', figsize=(10, 6), color='darkred')
     plt.title("Distribution of Emotion Shifts (Italian - English)")
@@ -63,6 +67,21 @@ def emotion_shifts():
     plt.axhline(0, linestyle='--', color='gray')
     plt.tight_layout()
     plt.savefig("static/img/emotion_shifts.png")
+
+    plt.figure(figsize=(10, 20))  # make it tall enough to show details
+    sns.clustermap(
+        emotion_diffs[diff_cols],
+        annot=False,  # turn off annotation for better performance
+        cmap="coolwarm",  # good diverging color map
+        center=0,  # center at 0 to highlight positive/negative shifts
+        cbar=True
+    )
+    plt.title("Emotion Differences per Sample")
+    plt.xlabel("Emotion")
+    plt.ylabel("Sample Index")
+    plt.tight_layout()
+    plt.savefig("static/img/emotion_shifts_heatmap.png")
+    plt.close()
 
     avg_diffs = emotion_diffs[diff_cols].mean().rename(lambda x: x.replace('diff_', ''))
     plt.figure(figsize=(8, 5))
@@ -95,35 +114,6 @@ def pca_analysis():
     plt.grid(True)
     plt.tight_layout()
     plt.savefig("static/img/pca_analysis.png")
-
-def paired_ttest():
-    results = []
-    for emotion in emotion_labels:
-        eng = data[f'eng_{emotion}']
-        it = data[f'it_{emotion}']
-        t_stat, p_val = ttest_rel(eng, it)
-        mean_diff = (it-eng).mean()
-        results.append({
-            'Emotion': emotion,
-            'Mean_EN': eng.mean(),
-            'Mean_IT': it.mean(),
-            'Mean_diff_IT-EN': mean_diff,
-            't_stat': t_stat,
-            'p_value': p_val
-        })
-    ttest_results = pd.DataFrame(results)
-    ttest_results['Significant'] = ttest_results['p_value'] < 0.05
-
-    plt.figure(figsize=(10, 6))
-    sns.barplot(data=ttest_results, x='Emotion', y='Mean_diff_IT-EN', palette='coolwarm', hue='Significant', dodge=False)
-    plt.axhline(0, linestyle='--', color='gray')
-    plt.title("Mean Emotion Difference (IT - EN) with Significance")
-    plt.ylabel("Mean Difference")
-    plt.xlabel("Emotion")
-    plt.xticks(rotation=45)
-    plt.legend(title='Significant', loc='upper right')
-    plt.tight_layout()
-    plt.savefig("static/img/ttest_results.png")
 
 def radar_plot():
     # Compute means
@@ -164,6 +154,97 @@ def radar_plot():
     plt.tight_layout()
     plt.savefig("static/img/radar_plot.png")
 
+def shapiro_wilks():
+    print("Shapiro-Wilk Test")
+
+    for col in data.columns:
+        stat, p = shapiro(data[col])
+        print(f"{col}: W={stat:.3f}, p={p:.4f} {'(normal)' if p > 0.05 else '(not normal)'}")
+
+def wilcoxon_test():
+    results = []
+    for emotion in emotion_labels:
+        eng = data[f'eng_{emotion}']
+        it = data[f'it_{emotion}']
+        stat, p = wilcoxon(eng, it)
+        mean_diff = (it - eng).mean()
+        results.append({
+            'Emotion': emotion,
+            'Mean_EN': eng.mean(),
+            'Mean_IT': it.mean(),
+            'Mean_diff_IT-EN': mean_diff,
+            'wilcoxon_stat': stat,
+            'p_value': p
+        })
+    wilcoxon_results = pd.DataFrame(results)
+    wilcoxon_results["p_adjust"] = false_discovery_control(wilcoxon_results['p_value'])
+    wilcoxon_results['Significant'] = wilcoxon_results['p_adjust'] < 0.05
+
+    # Table of results
+    t_wilcoxon = wilcoxon_results[['Emotion', 'p_value', 'p_adjust', 'Significant']]
+    t_wilcoxon[['p_value', 'p_adjust']] = t_wilcoxon[['p_value', 'p_adjust']].map(lambda x: f"{x:.2e}")
+    fig, ax = plt.subplots(figsize=(6, 3))
+    ax.axis('tight')
+    ax.axis('off')
+    tab = ax.table(
+        cellText=t_wilcoxon.values,
+        colLabels=t_wilcoxon.columns,
+        loc='center',
+        cellLoc='center'
+    )
+
+    tab.auto_set_font_size(False)
+    tab.set_fontsize(12)
+    tab.scale(1.2, 1.6)
+
+    for key, cell in tab.get_celld().items():
+        row, col = key
+        if col == 0:
+            cell.set_text_props(weight='bold', color='black')
+            cell.set_linewidth(1.5)
+            cell.set_facecolor('#dddddd')
+
+        if row == 0:
+            cell.set_text_props(weight='bold', color='black')
+            cell.set_linewidth(1.5)
+            cell.set_facecolor('#d9ead3')
+        else:
+            if col != 0:
+                if row % 2 == 0:
+                    cell.set_facecolor('#dddddd')
+                else:
+                    cell.set_facecolor('#ffffff')
+
+                col_name = t_wilcoxon.columns[col]
+                if col_name == 'Significant':
+                    value = t_wilcoxon.iloc[row - 1, col]
+                    if not value:
+                        cell.set_text_props(weight='bold', color='red')
+                    elif value == True:
+                        cell.set_text_props(weight='bold', color='green')
+
+    plt.savefig("static/img/wilcoxon_table.png")
+
+    # Bar plot with differences and Hypotheses test results highlighted
+    plt.figure(figsize=(10, 6))
+    sns.barplot(data=wilcoxon_results, x='Emotion', y='Mean_diff_IT-EN', palette='coolwarm', hue='Significant',
+                dodge=False)
+    plt.axhline(0, linestyle='--', color='gray')
+    plt.title("Mean Emotion Difference (IT - EN) with Significance")
+    plt.ylabel("Mean Difference")
+    plt.xlabel("Emotion")
+    plt.xticks(rotation=45)
+    plt.legend(title='Significant', loc='upper right')
+    plt.tight_layout()
+    plt.savefig("static/img/wlc_results.png")
+
+def cluster_heat():
+    plt.figure(figsize=(10, 6))
+    sns.clustermap(data=data, cmap='coolwarm')
+    plt.title("Cluster Heatmap")
+    plt.tight_layout()
+    plt.savefig("static/img/cluster_heat.png")
+
 
 if __name__ == '__main__':
     data = load_data()
@@ -177,16 +258,23 @@ if __name__ == '__main__':
 
     mean_and_std()
     emotion_shifts()
-    pca_analysis() # TODO Verificar: Se calhar não faz muito sentido
-    paired_ttest()
+    pca_analysis()
     radar_plot()
+
+    shapiro_wilks()
+    wilcoxon_test()
+
+    # TODO plot data with violin plot
+    # TODO clustering by sample
+
+    cluster_heat()
 
     # There is a relevant difference between all emotions besides anger and fear.
     # Trust has the highest difference, english considerably conveys more trust than italian
 
     # Interestingly, sadness, disgust and surprise are stronger in the italian responses, and especially interesting
     # is the two relevant differences in "negative" emotions, sadness and disgust, this may be due to differences in
-    # cultural norms of expression, language structure or training data composition.”
+    # cultural norms of expression, language structure or training data composition.
 
 
 
